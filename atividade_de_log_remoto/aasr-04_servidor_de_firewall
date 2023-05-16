@@ -1,0 +1,113 @@
+#!/bin/bash
+  
+# Verificar se os argumentos necess?rios foram fornecidos
+if [ $# -lt 2 ]; then
+    echo "Erro: este script requer dois argumentos: o endere?o IP do Servidor de logs e a porta do servidor."
+    echo "Exemplo de uso: ./script.sh <ENDERE?O_IP> 514"
+    exit 1
+fi
+
+
+ip_address=$1
+port=$2
+
+iptables -F
+
+# Configura as regras do iptables
+iptables -F LOGRATE
+iptables -X LOGRATE
+iptables -N LOGRATE
+iptables -A LOGRATE -j NFLOG --nflog-group 6 --nflog-prefix "TR-REJEITADA:"
+iptables -A LOGRATE -j REJECT
+iptables -F LOGACCEPT
+iptables -X LOGACCEPT
+iptables -N LOGACCEPT
+iptables -A LOGACCEPT -j NFLOG --nflog-group 7 --nflog-prefix "TR-ACEITA:" 
+iptables -A LOGACCEPT -j ACCEPT
+
+iptables -A INPUT -p tcp --dport 110 -m state --state NEW -m hashlimit --hashlimit 1/sec --hashlimit-mode srcip,dstport --hashlimit-name tunnel_limit -j LOGACCEPT
+
+iptables -A INPUT -p tcp -m state --state NEW -m tcp --dport 110 -j LOGRATE
+
+
+
+
+#    Para configurar o rsyslogd deve adicionar as seguintes linhas ao arquivo de configura??o do rsyslogd, geralmente localizado em /etc/rsyslog.conf ou /etc/rsyslog.d/50-default.conf:
+
+cat >> /etc/rsyslog.conf <<EOL
+
+#    Armazena mensagens com facilidade "LOCAL6" e criticidade "INFORMATIONAL" no arquivo "/var/log/firewall.log"
+local6.=info /var/log/firewall.log
+
+#    Armazena mensagens com facilidade "LOCAL6" e criticidade "NOTICE" no arquivo "/var/log/firewall.log"
+local6.=notice /var/log/firewall.log
+
+#    Envia mensagens com facilidade "LOCAL6" e criticidade "NOTICE" para o servidor de log remoto
+#local6.=notice @$ip_address     # UDP
+local6.=notice @@$ip_address:$port     # TCP
+EOL
+
+
+#    Adicionar essas linhas no arquivo /etc/ulogd.conf
+
+<<com
+
+
+stack=log6:NFLOG,base1:BASE,ifi1:IFINDEX,ip2str1:IP2STR,print1:PRINTPKT,tr1:SYSLOG
+stack=log7:NFLOG,base1:BASE,ifi1:IFINDEX,ip2str1:IP2STR,print1:PRINTPKT,tr2:SYSLOG
+
+[log6]
+group=6
+
+[log7]
+group=7 
+
+[tr1]
+
+file="/var/log/firewall.log"
+sync=1
+facility=LOG_LOCAL6
+level=LOG_NOTICE
+
+[tr2]
+
+file="/var/log/firewall.log"
+sync=1
+facility=LOG_LOCAL6
+level=LOG_INFO
+
+
+
+com
+
+
+#    Criar um novo arquivo de configura??o para o logrotate em /etc/logrotate.d/rsyslog.
+#nano /etc/logrotate.d/rsyslog
+
+#     Adicionar o seguinte bloco de configura??o ao arquivo /etc/logrotate.d/rsyslog
+cat << EOF > /etc/logrotate.d/rsyslog 
+/var/log/firewall.log 
+
+{
+    missingok
+    daily
+    rotate 5
+    ifempty
+    create 640 root root        
+    postrotate
+        /usr/bin/killall -HUP rsyslogd 2> /dev/null || true
+    endscript
+
+}
+EOF
+
+
+
+#     Adicionar a seguinte linha ao arquivo /etc/crontab para agendar a execu??o di?ria do logrotate ?s 0h30min:
+echo "30 0 * * * root /usr/sbin/logrotate /etc/logrotate.d/rsyslog" >> /etc/crontab
+
+
+#     Reiniciar os servi?os de log
+killall ulogd
+service rsyslog restart
+/sbin/ulogd -d
